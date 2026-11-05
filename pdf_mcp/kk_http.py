@@ -136,6 +136,10 @@ def guarded(fn: Callable[..., Any], root: Path, allow_signing_network: bool) -> 
             for name, value in bound.arguments.items():
                 kind = signature.parameters[name].kind
                 if kind is inspect.Parameter.VAR_KEYWORD:
+                    # MCP publishes **kwargs as a required object argument named
+                    # after it (batch_process: "kwargs"), so it arrives nested.
+                    if set(value) == {name} and isinstance(value[name], dict):
+                        value = value[name]
                     # batch_process passes **kwargs on to another tool: same checks.
                     bound.arguments[name] = check_arguments(value, root, allow_signing_network)
                 elif kind is inspect.Parameter.VAR_POSITIONAL:

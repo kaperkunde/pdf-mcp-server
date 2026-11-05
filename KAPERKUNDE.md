@@ -118,6 +118,11 @@ Off unless `PDF_MCP_ENABLE_AI_TOOLS=1`: `get_llm_backend_info`,
   fillpdf flattens as images, which no tool asks for.
 - **Errors** carried a full traceback (server.py:62-65); this entry point
   does not.
+- **`batch_process`** declares `**kwargs` (pdf_tools.py:3671), which MCP
+  publishes as a required object argument `kwargs`; upstream then passes it
+  on nested and the call fails. Here a caller sends `"kwargs": {}` (or the
+  options for `optimize_pdf`) and they are unwrapped and checked like the
+  rest.
 - **Left as they are:** `redact_text_regex` runs a caller's regular
   expression (CPU only); tools run with no time limit; MuPDF, Pillow and
   Tesseract parse untrusted files (the reason for the non-root user, the

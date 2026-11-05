@@ -103,6 +103,11 @@ def test_guarded_checks_var_keyword_arguments(root: Path) -> None:
     assert wrapped(pdf_paths=["a.pdf"], operation="x") == "ok"
     assert "error" in wrapped(pdf_paths=["a.pdf"], operation="x", output_path="/etc/x")
     assert "error" in wrapped(pdf_paths=["/etc/x"], operation="x")
+    # As MCP sends it: the **kwargs object nested under its own name.
+    seen.clear()
+    assert wrapped(pdf_paths=["a.pdf"], operation="x", kwargs={"quality": "low"}) == "ok"
+    assert seen == {"quality": "low"}
+    assert "error" in wrapped(pdf_paths=["a.pdf"], operation="x", kwargs={"output_path": "/etc/x"})
 
 
 def test_guarded_answers_errors_without_traceback(root: Path) -> None:
