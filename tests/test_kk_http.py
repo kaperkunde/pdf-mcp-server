@@ -424,3 +424,60 @@ def test_file_tools_through_the_server(root: Path, monkeypatch) -> None:
     # Strict: no coercion of "yes" into true.
     with pytest.raises(Exception, match="valid boolean"):
         asyncio.run(server.call_tool("put_file", {"file_path": "x.pdf", "content_base64": "", "overwrite": "yes"}))
+
+
+def test_every_upstream_tool_has_a_reviewed_tier() -> None:
+    """A new upstream tool is reviewed into TOOL_TIERS before it is exposed."""
+    upstream = {tool.name for tool in kk_http.exposed_tools(True)}
+    assert upstream == set(kk_http.TOOL_TIERS)
+    with pytest.raises(RuntimeError, match="TOOL_TIERS"):
+        kk_http.tool_annotations("not_a_tool", False)
+
+
+@pytest.mark.parametrize("enable_ai", [False, True])
+def test_every_exposed_tool_states_its_hints(root: Path, monkeypatch, enable_ai: bool) -> None:
+    monkeypatch.setenv("PDF_MCP_DATA_DIR", str(root))
+    monkeypatch.setenv("PDF_MCP_ENABLE_AI_TOOLS", "1" if enable_ai else "0")
+    monkeypatch.delenv("PDF_MCP_ALLOW_SIGNING_NETWORK", raising=False)
+    server, names = kk_http.build_server()
+    listed = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    assert set(listed) == set(names)
+    for name, tool in listed.items():
+        hints = tool.annotations
+        assert hints is not None, name
+        assert isinstance(hints.read_only_hint, bool), name
+        assert isinstance(hints.destructive_hint, bool), name
+        assert isinstance(hints.idempotent_hint, bool), name
+        assert isinstance(hints.open_world_hint, bool), name
+        if hints.read_only_hint:
+            assert hints.destructive_hint is False, name
+
+    def tier(name: str) -> str:
+        hints = listed[name].annotations
+        if hints.read_only_hint:
+            return "read"
+        return "destructive" if hints.destructive_hint else "write"
+
+    for name in ("get_pdf_form_fields", "get_pdf_metadata", "extract_text", "compare_pdfs", "get_file"):
+        assert tier(name) == "read", name
+    # Writing a file is not reading: these take an output_path or output_dir.
+    for name in ("extract_images", "export_pdf", "split_pdf", "batch_process", "fill_pdf_form", "remove_pages"):
+        assert tier(name) == "write", name
+    assert tier("delete_file") == "destructive"
+    assert [n for n in listed if tier(n) == "destructive"] == ["delete_file"]
+    assert listed["sign_pdf"].annotations.open_world_hint is False
+    assert listed["extract_text"].annotations.idempotent_hint is True
+    assert listed["rotate_pages"].annotations.idempotent_hint is False
+    if enable_ai:
+        assert listed["auto_fill_pdf_form"].annotations.open_world_hint is True
+        assert tier("auto_fill_pdf_form") == "write"
+
+
+def test_signing_is_open_world_only_with_signing_network(root: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PDF_MCP_DATA_DIR", str(root))
+    monkeypatch.setenv("PDF_MCP_ALLOW_SIGNING_NETWORK", "1")
+    server, _ = kk_http.build_server()
+    listed = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    assert listed["sign_pdf"].annotations.open_world_hint is True
+    assert listed["sign_pdf_pem"].annotations.open_world_hint is True
+    assert listed["verify_digital_signatures"].annotations.open_world_hint is False

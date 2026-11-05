@@ -78,7 +78,9 @@ an SBOM. Refer to the image by the digest that workflow prints.
    `content_base64` arrives as base64, and `get_file`'s answer is kept as a
    file and comes back as a handle, so the bytes never pass through the
    assistant.
-6. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
+6. **Tool annotations.** Every exposed tool states whether it reads, writes
+   or destroys, from a reviewed table (see [Tool tiers](#tool-tiers)).
+7. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
    `bootstrap-labels.yml` (a weekly scheduled job) workflows are removed.
 
 ## Running it
@@ -122,6 +124,36 @@ read and write there only, and `get_file` takes results out.
 
 Off unless `PDF_MCP_ENABLE_AI_TOOLS=1`: `get_llm_backend_info`,
 `auto_fill_pdf_form`, `extract_structured_data`, `analyze_pdf_content`.
+
+### Tool tiers
+
+Upstream registers its tools with no MCP annotations, which a client such as
+PCP reads as destructive. `kk_http.py` (`TOOL_TIERS`, `tool_annotations`)
+states `readOnlyHint`, `destructiveHint`, `idempotentHint` and
+`openWorldHint` on every tool it exposes, from a table reviewed against
+`pdf_tools.py`; a tool missing from the table stops the server from starting
+(`registry.py` is unchanged). Every tool states `openWorldHint: false`, but
+for `sign_pdf` and `sign_pdf_pem` while `PDF_MCP_ALLOW_SIGNING_NETWORK=1`
+and the `ai` tools.
+
+| Tier | Tools |
+| --- | --- |
+| Read (`readOnlyHint`, idempotent) | `get_pdf_form_fields`, `get_form_templates`, `detect_form_fields`, `detect_pii_patterns`, `get_pdf_metadata`, `detect_pdf_type`, `verify_digital_signatures`, `get_pdf_text_blocks`, `extract_tables`, `extract_links`, `detect_barcodes`, `extract_text`, `get_ocr_languages`, `get_image_info`, `compare_pdfs`, `get_file`, `list_files`; with the `ai` tools, `get_llm_backend_info`, `extract_structured_data`, `analyze_pdf_content` |
+| Write (not read-only, not destructive) | every other upstream tool, including `extract_images`, `split_pdf` (files into `output_dir`), `export_pdf` (Markdown or JSON to `output_path`) and `batch_process` (`optimize` writes into `output_dir`); `put_file`; with the `ai` tools, `auto_fill_pdf_form` |
+| Destructive | `delete_file` |
+
+Idempotent among the writes: `create_pdf_form`,
+`create_pdf_form_from_template`, `flatten_pdf`, `clear_pdf_form_fields`,
+`set_pdf_metadata`, `sanitize_pdf_metadata` (a repeat leaves the same file,
+even in place).
+
+No upstream tool works in place by default: each takes its `output_path` or
+`output_dir` as a required argument, and the removing ones (`remove_pages`,
+`remove_annotations`, `redact_text_regex`, `sanitize_pdf_metadata`, …) write
+the result there and leave the input as it was. They do write over a file
+already at that name, the input too when a caller names it as the output, as
+upstream always has. Of all the tools only `put_file` refuses a file already
+there (unless `overwrite`).
 
 ## What the review found at v2.0.0
 

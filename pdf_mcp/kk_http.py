@@ -29,6 +29,9 @@ runs:
   ``-p 127.0.0.1:…`` reaches it, plus ``MCP_ALLOWED_HOSTS`` (comma
   separated, ``host:*`` for any port; ``*`` turns the check off).
 * Errors are answered without tracebacks.
+* **Annotations on every tool**: read-only, write or destructive, idempotent
+  and open-world hints from :data:`TOOL_TIERS`, reviewed per tool, so a
+  client does not take every upstream tool for a destructive one.
 * **Files in and out**: ``put_file``, ``get_file``, ``list_files`` and
   ``delete_file`` move files into and out of the data directory over MCP
   (base64 in, an embedded resource out), within ``PDF_MCP_MAX_FILE_BYTES``
@@ -188,6 +191,115 @@ def exposed_tools(enable_ai: bool) -> Iterable[Any]:
         if tool.verb == "ai" and not enable_ai:
             continue
         yield tool
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations (MCP hints), reviewed per tool against pdf_tools.py
+# ---------------------------------------------------------------------------
+
+READ = "read"  # reads its inputs and answers; writes nothing
+WRITE = "write"  # writes the output_path / output_dir it is given; never removes a file
+
+# name -> (tier, idempotentHint). Every write tool takes its output_path (or
+# output_dir) as a required argument and none writes over its input by
+# default; each writes over a file already at that name, as upstream does.
+# Idempotent: a read, or a write whose repeat with the same arguments leaves
+# the same file even when output_path names the input.
+TOOL_TIERS: dict[str, tuple[str, bool]] = {
+    # form
+    "get_pdf_form_fields": (READ, True),
+    "fill_pdf_form": (WRITE, False),
+    "fill_pdf_form_any": (WRITE, False),
+    "create_pdf_form": (WRITE, True),
+    "get_form_templates": (READ, True),
+    "create_pdf_form_from_template": (WRITE, True),
+    "flatten_pdf": (WRITE, True),
+    "clear_pdf_form_fields": (WRITE, True),
+    "detect_form_fields": (READ, True),
+    # security
+    "encrypt_pdf": (WRITE, False),
+    "detect_pii_patterns": (READ, True),
+    # pages
+    "merge_pdfs": (WRITE, False),
+    "extract_pages": (WRITE, False),
+    "rotate_pages": (WRITE, False),
+    "reorder_pages": (WRITE, False),
+    "insert_pages": (WRITE, False),
+    "remove_pages": (WRITE, False),
+    "optimize_pdf": (WRITE, False),
+    "split_pdf": (WRITE, False),
+    # text
+    "add_text_annotation": (WRITE, False),
+    "update_text_annotation": (WRITE, False),
+    "remove_text_annotation": (WRITE, False),
+    "remove_annotations": (WRITE, False),
+    "redact_text_regex": (WRITE, False),
+    "add_page_numbers": (WRITE, False),
+    "add_bates_numbering": (WRITE, False),
+    "add_text_watermark": (WRITE, False),
+    "add_highlight": (WRITE, False),
+    "add_date_stamp": (WRITE, False),
+    "add_comment": (WRITE, False),
+    "update_comment": (WRITE, False),
+    "remove_comment": (WRITE, False),
+    # metadata
+    "get_pdf_metadata": (READ, True),
+    "set_pdf_metadata": (WRITE, True),
+    "sanitize_pdf_metadata": (WRITE, True),
+    "detect_pdf_type": (READ, True),
+    # sign (verification never fetches: allow_fetching=False)
+    "verify_digital_signatures": (READ, True),
+    "sign_pdf": (WRITE, False),
+    "sign_pdf_pem": (WRITE, False),
+    "add_signature_image": (WRITE, False),
+    "update_signature_image": (WRITE, False),
+    "remove_signature_image": (WRITE, False),
+    # extract
+    "get_pdf_text_blocks": (READ, True),
+    "extract_tables": (READ, True),
+    "extract_images": (WRITE, False),  # writes image files into output_dir
+    "extract_links": (READ, True),
+    "detect_barcodes": (READ, True),
+    "extract_text": (READ, True),
+    "export_pdf": (WRITE, False),  # writes Markdown or JSON to output_path
+    # ocr
+    "get_ocr_languages": (READ, True),
+    "get_image_info": (READ, True),
+    # batch
+    "compare_pdfs": (READ, True),
+    "batch_process": (WRITE, False),  # "optimize" writes into output_dir
+    # ai (off unless PDF_MCP_ENABLE_AI_TOOLS=1)
+    "get_llm_backend_info": (READ, True),
+    "auto_fill_pdf_form": (WRITE, False),
+    "extract_structured_data": (READ, True),
+    "analyze_pdf_content": (READ, True),
+}
+# Tools that may reach beyond this server: an LLM backend, and the signing
+# tools when PDF_MCP_ALLOW_SIGNING_NETWORK=1 lets them reach a timestamp
+# server or fetch revocation data.
+_LLM_TOOLS = {"get_llm_backend_info", "auto_fill_pdf_form", "extract_structured_data", "analyze_pdf_content"}
+_NETWORK_SIGNING_TOOLS = {"sign_pdf", "sign_pdf_pem"}
+
+
+def tool_annotations(name: str, allow_signing_network: bool) -> Any:
+    """The MCP annotations for one upstream tool, from :data:`TOOL_TIERS`.
+
+    A tool missing from the table is an error: a new upstream tool is
+    reviewed before it is exposed, rather than left to read as destructive.
+    """
+    from mcp_types import ToolAnnotations
+
+    try:
+        tier, idempotent = TOOL_TIERS[name]
+    except KeyError:
+        raise RuntimeError(f"Tool {name!r} has no entry in kk_http.TOOL_TIERS; review it and add one") from None
+    open_world = name in _LLM_TOOLS or (name in _NETWORK_SIGNING_TOOLS and allow_signing_network)
+    return ToolAnnotations(
+        readOnlyHint=tier == READ,
+        destructiveHint=False,
+        idempotentHint=idempotent,
+        openWorldHint=open_world,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +689,7 @@ def build_server():
     for tool in exposed_tools(enable_ai):
         wrapped = guarded(tool.callable.resolve(), root, allow_signing_network)
         wrapped.__doc__ = tool.description
-        server.tool()(wrapped)
+        server.tool(annotations=tool_annotations(tool.name, allow_signing_network))(wrapped)
         names.append(tool.name)
     names.extend(register_file_tools(server, root, max_file_bytes()))
 
