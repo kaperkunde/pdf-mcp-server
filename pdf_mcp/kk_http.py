@@ -25,9 +25,9 @@ runs:
   like ``eng`` or ``eng+nld``, never a path for Tesseract to load.
 * **Optional bearer token**: when ``MCP_API_KEY`` is set, every request but
   ``GET /health`` must send ``Authorization: Bearer <MCP_API_KEY>``.
-* **Host header check** (DNS rebinding): ``MCP_ALLOWED_HOSTS`` (comma
-  separated, ``host:*`` for any port; ``*`` turns the check off), by default
-  loopback only, which is how a tunnel or ``-p 127.0.0.1:…`` reaches it.
+* **Host header check** (DNS rebinding): loopback, which is how a tunnel or
+  ``-p 127.0.0.1:…`` reaches it, plus ``MCP_ALLOWED_HOSTS`` (comma
+  separated, ``host:*`` for any port; ``*`` turns the check off).
 * Errors are answered without tracebacks.
 
 Settings (environment): ``MCP_HOST`` (default ``0.0.0.0``), ``MCP_PORT``
@@ -242,7 +242,8 @@ def transport_security():
     raw = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
     if raw == "*":
         return TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    hosts = [h.strip() for h in raw.split(",") if h.strip()] if raw else DEFAULT_ALLOWED_HOSTS
+    # Loopback always; MCP_ALLOWED_HOSTS adds to it (an address it is published on).
+    hosts = DEFAULT_ALLOWED_HOSTS + [h.strip() for h in raw.split(",") if h.strip()]
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,

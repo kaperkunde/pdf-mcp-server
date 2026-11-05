@@ -69,7 +69,7 @@ Put PDFs in the `pdf-mcp-data` volume; tools read and write there only.
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `MCP_API_KEY` | unset | When set, every request but `/health` must send `Authorization: Bearer <key>`. |
-| `MCP_ALLOWED_HOSTS` | loopback | `Host` values accepted (comma separated, `host:*` for any port, `*` for any host). Add the address you publish on if it is not loopback. |
+| `MCP_ALLOWED_HOSTS` | unset | `Host` values accepted besides loopback (comma separated, `host:*` for any port, `*` for any host): the address you publish on, if it is not loopback. |
 | `MCP_PORT`, `MCP_HOST`, `MCP_PATH` | `8000`, `0.0.0.0`, `/mcp` | Where it listens. |
 | `MCP_STATELESS` | off | `1` for stateless Streamable HTTP (no session id). |
 | `PDF_MCP_DATA_DIR` | `/data` | The one directory tools may touch. |

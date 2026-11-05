@@ -166,3 +166,15 @@ def test_bearer_auth() -> None:
     _call(guard, "/mcp", [(b"authorization", b"Bearer s3cret")])
     _call(guard, "/health", [])
     assert reached == ["/mcp", "/health"]
+
+
+def test_allowed_hosts_add_to_loopback(monkeypatch) -> None:
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    settings = kk_http.transport_security()
+    assert settings.enable_dns_rebinding_protection
+    assert "127.0.0.1:*" in settings.allowed_hosts
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "192.0.2.10:8000")
+    settings = kk_http.transport_security()
+    assert "127.0.0.1:*" in settings.allowed_hosts and "192.0.2.10:8000" in settings.allowed_hosts
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "*")
+    assert not kk_http.transport_security().enable_dns_rebinding_protection
