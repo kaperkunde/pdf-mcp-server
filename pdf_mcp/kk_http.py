@@ -29,6 +29,12 @@ runs:
   ``-p 127.0.0.1:…`` reaches it, plus ``MCP_ALLOWED_HOSTS`` (comma
   separated, ``host:*`` for any port; ``*`` turns the check off).
 * Errors are answered without tracebacks.
+* **Files in and out**: ``put_file``, ``get_file``, ``list_files`` and
+  ``delete_file`` move files into and out of the data directory over MCP
+  (base64 in, an embedded resource out), within ``PDF_MCP_MAX_FILE_BYTES``
+  (default 128 MiB). They refuse ``..``, resolve the folder a name is in
+  with :func:`os.path.realpath` and act on the name itself, never on the
+  data directory.
 
 Settings (environment): ``MCP_HOST`` (default ``0.0.0.0``), ``MCP_PORT``
 (default ``8000``), ``MCP_PATH`` (default ``/mcp``), ``MCP_STATELESS``
@@ -37,15 +43,23 @@ Settings (environment): ``MCP_HOST`` (default ``0.0.0.0``), ``MCP_PORT``
 
 from __future__ import annotations
 
+import base64
+import binascii
+import errno
 import functools
+import hashlib
 import hmac
 import inspect
 import json
 import logging
 import os
 import re
+import secrets
+import stat
+import typing
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Annotated, Any, Callable, Iterable
 
 logger = logging.getLogger("pdf_mcp.kk_http")
 
@@ -63,6 +77,11 @@ _LANGUAGE_ARGS = {"language", "ocr_language"}
 _LANGUAGE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,31}(?:\+[A-Za-z][A-Za-z0-9_]{1,31}){0,7}$")
 
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*", "127.0.0.1", "localhost", "[::1]"]
+
+# The largest file put_file takes and get_file hands out.
+DEFAULT_MAX_FILE_BYTES = 128 * 1024 * 1024
+# The most entries list_files answers with.
+MAX_LIST_ENTRIES = 5000
 
 
 class Refused(Exception):
@@ -115,7 +134,9 @@ def check_arguments(arguments: dict[str, Any], root: Path, allow_signing_network
         elif name in _NETWORK_SIGNING_ARGS and not allow_signing_network:
             if name == "allow_fetching" and value is False:
                 continue
-            raise Refused(f"{name} is disabled on this server (no network); set PDF_MCP_ALLOW_SIGNING_NETWORK=1 to allow")
+            raise Refused(
+                f"{name} is disabled on this server (no network); set PDF_MCP_ALLOW_SIGNING_NETWORK=1 to allow"
+            )
         elif name in _LANGUAGE_ARGS:
             if not isinstance(value, str) or not _LANGUAGE.match(value):
                 raise Refused(f"{name} must be Tesseract language codes like 'eng' or 'eng+nld'")
@@ -169,6 +190,379 @@ def exposed_tools(enable_ai: bool) -> Iterable[Any]:
         yield tool
 
 
+# ---------------------------------------------------------------------------
+# Files in and out of the data directory
+# ---------------------------------------------------------------------------
+
+
+def max_file_bytes() -> int:
+    """``PDF_MCP_MAX_FILE_BYTES``, a positive whole number of bytes (default 128 MiB)."""
+    raw = os.environ.get("PDF_MCP_MAX_FILE_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_MAX_FILE_BYTES
+    if not raw.isdigit() or int(raw) <= 0:
+        raise ValueError("PDF_MCP_MAX_FILE_BYTES must be a positive number of bytes")
+    return int(raw)
+
+
+def confine_entry(value: Any, root: Path, name: str) -> Path:
+    """Return the entry ``value`` names under ``root``, or raise :class:`Refused`.
+
+    The folder it is in is resolved with :func:`os.path.realpath` and must be
+    ``root`` or inside it; the last name is kept as it is, so a symbolic link
+    is the entry itself, not what it points to. ``..`` is refused outright.
+    Returns ``root`` itself when ``value`` names it.
+    """
+    if not isinstance(value, str) or not value:
+        raise Refused(f"{name} must be a path")
+    if "\x00" in value:
+        raise Refused(f"{name} must not contain NUL")
+    if value.startswith("~"):
+        raise Refused(f"{name}: '~' is not expanded here; use a path under {root}")
+    if ".." in value.split("/"):
+        raise Refused(f"{name} must not contain '..'")
+    candidate = value if os.path.isabs(value) else os.path.join(root, value)
+    normalized = os.path.normpath(candidate)
+    if normalized == str(root) or (os.path.realpath(normalized) == str(root) and not os.path.islink(normalized)):
+        return root
+    folder = confine(os.path.dirname(normalized), root, name)
+    return Path(folder) / os.path.basename(normalized)
+
+
+_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+_TEXT_CONTROLS = set(range(0x20)) - {0x09, 0x0A, 0x0C, 0x0D}
+
+
+def sniff_mime(data: bytes) -> str:
+    """The media type ``data`` holds, from its first bytes; never from a name."""
+    if b"%PDF-" in data[:1024]:
+        return "application/pdf"
+    for signature, mime in _SIGNATURES:
+        if data.startswith(signature):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return "application/octet-stream"
+        if not any(ord(ch) in _TEXT_CONTROLS for ch in text[:65536]):
+            return "text/plain"
+    return "application/octet-stream"
+
+
+def _decode_base64(content: Any, limit: int) -> bytes:
+    if not isinstance(content, str):
+        raise Refused("content_base64 must be a string")
+    # Refuse an oversized file before decoding it: 4 characters carry 3 bytes.
+    if len(content) // 4 * 3 - content[-2:].count("=") > limit:
+        raise Refused(f"the file is larger than {limit} bytes")
+    try:
+        data = base64.b64decode(content, validate=True)
+    except (binascii.Error, ValueError):
+        raise Refused("content_base64 is not valid base64 (standard alphabet, padded, no white space)") from None
+    if len(data) > limit:
+        raise Refused(f"the file is larger than {limit} bytes")
+    return data
+
+
+def put_file_in(root: Path, limit: int, file_path: Any, content_base64: Any, overwrite: bool = False) -> dict[str, Any]:
+    """Write a file under ``root``: a ``.part`` file made exclusively, then renamed into place."""
+    data = _decode_base64(content_base64, limit)
+    target = confine_entry(file_path, root, "file_path")
+    if target == root:
+        raise Refused("file_path must name a file, not the data folder")
+    try:
+        os.makedirs(target.parent, exist_ok=True)
+    except OSError as exc:
+        raise Refused(f"file_path: cannot make its folder ({exc.strerror})") from None
+    replaced = False
+    try:
+        existing = os.lstat(target)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if stat.S_ISDIR(existing.st_mode):
+            raise Refused("file_path names a folder")
+        if not overwrite:
+            raise Refused("file_path exists; pass overwrite=true to replace it")
+        replaced = True
+    part = target.parent / f"{target.name}.{secrets.token_hex(8)}.part"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(part, flags, 0o666)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(part, target)
+        except BaseException:
+            try:
+                os.unlink(part)
+            except FileNotFoundError:
+                pass
+            raise
+    except OSError as exc:
+        raise Refused(f"file_path: cannot write ({exc.strerror})") from None
+    return {
+        "path": str(target),
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "replaced": replaced,
+    }
+
+
+def read_file_in(root: Path, limit: int, file_path: Any) -> tuple[Path, bytes]:
+    """Read a file under ``root`` (a link is followed only to a file under ``root``)."""
+    entry = confine_entry(file_path, root, "file_path")
+    real = Path(confine(str(entry), root, "file_path"))
+    try:
+        fd = os.open(real, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except FileNotFoundError:
+        raise Refused(f"file_path: no such file: {file_path}") from None
+    except OSError as exc:
+        raise Refused(f"file_path: cannot read ({exc.strerror})") from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise Refused("file_path does not name a file")
+        if info.st_size > limit:
+            raise Refused(f"the file is larger than {limit} bytes")
+        data = handle.read(limit + 1)
+    if len(data) > limit:
+        raise Refused(f"the file is larger than {limit} bytes")
+    return real, data
+
+
+def get_file_in(root: Path, limit: int, file_path: Any):
+    """A file under ``root`` as an MCP embedded resource (base64 blob)."""
+    from mcp_types import BlobResourceContents, EmbeddedResource
+
+    real, data = read_file_in(root, limit, file_path)
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri=real.as_uri(),
+            mime_type=sniff_mime(data),
+            blob=base64.b64encode(data).decode("ascii"),
+        ),
+    )
+
+
+def _modified(info: os.stat_result) -> str:
+    return datetime.fromtimestamp(info.st_mtime, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def list_files_in(root: Path, dir_path: Any = None) -> dict[str, Any]:
+    """The entries of a folder under ``root``: folders first, then files, each by name."""
+    entry = confine_entry(str(root) if dir_path is None else dir_path, root, "dir_path")
+    folder = Path(confine(str(entry), root, "dir_path"))
+    if not folder.is_dir():
+        raise Refused(f"dir_path: no such folder: {dir_path}")
+    entries = []
+    truncated = False
+    try:
+        with os.scandir(folder) as scan:
+            for item in scan:
+                if len(entries) >= MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
+                path = folder / item.name
+                if item.is_symlink():
+                    # Shown only when it points at something under root.
+                    try:
+                        confine(str(path), root, "dir_path")
+                    except Refused:
+                        continue
+                try:
+                    info = os.stat(path)
+                except OSError:
+                    continue
+                is_folder = stat.S_ISDIR(info.st_mode)
+                if not is_folder and not stat.S_ISREG(info.st_mode):
+                    continue
+                entries.append(
+                    {
+                        "name": item.name,
+                        "path": str(path),
+                        "type": "folder" if is_folder else "file",
+                        "bytes": None if is_folder else info.st_size,
+                        "modified": _modified(info),
+                    }
+                )
+    except OSError as exc:
+        raise Refused(f"dir_path: cannot list ({exc.strerror})") from None
+    entries.sort(key=lambda e: (e["type"] != "folder", e["name"].casefold(), e["name"]))
+    return {"path": str(folder), "entries": entries, "truncated": truncated}
+
+
+def delete_file_in(root: Path, file_path: Any) -> dict[str, Any]:
+    """Remove a file, a link or an empty folder under ``root``; never ``root`` itself."""
+    target = confine_entry(file_path, root, "file_path")
+    if target == root:
+        raise Refused("the data folder itself cannot be deleted")
+    try:
+        info = os.lstat(target)
+    except FileNotFoundError:
+        raise Refused(f"file_path: no such file or folder: {file_path}") from None
+    try:
+        if stat.S_ISDIR(info.st_mode):
+            os.rmdir(target)
+            kind = "folder"
+        else:
+            os.unlink(target)
+            kind = "link" if stat.S_ISLNK(info.st_mode) else "file"
+    except OSError as exc:
+        if stat.S_ISDIR(info.st_mode) and exc.errno == errno.ENOTEMPTY:
+            raise Refused("file_path: the folder is not empty") from None
+        raise Refused(f"file_path: cannot delete ({exc.strerror})") from None
+    return {"path": str(target), "deleted": kind}
+
+
+FILE_TOOL_NAMES = ("put_file", "get_file", "list_files", "delete_file")
+
+
+def register_file_tools(server: Any, root: Path, limit: int) -> list[str]:
+    """Add put_file, get_file, list_files and delete_file to ``server``."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    from mcp_types import EmbeddedResource, ToolAnnotations
+    from pydantic import ConfigDict, Field
+
+    def answer(run: Callable[[], Any]) -> Any:
+        try:
+            return run()
+        except Refused as exc:
+            raise ToolError(str(exc)) from None
+
+    FilePath = Annotated[
+        str,
+        Field(
+            strict=True,
+            min_length=1,
+            description=f"Where the file is: a path under {root} (absolute, or relative to it). '..' is refused.",
+        ),
+    ]
+
+    def put_file(
+        file_path: FilePath,
+        content_base64: Annotated[
+            str,
+            Field(
+                strict=True,
+                description=(
+                    "The file's bytes in standard base64 (padded, no white space), at most "
+                    f"{limit} bytes once decoded. A PCP file handle given here arrives as base64."
+                ),
+            ),
+        ],
+        overwrite: Annotated[
+            bool,
+            Field(
+                strict=True,
+                description="Replace a file already at file_path. Off by default: an existing file is refused.",
+            ),
+        ] = False,
+    ) -> dict[str, Any]:
+        return answer(lambda: put_file_in(root, limit, file_path, content_base64, overwrite))
+
+    put_file.__doc__ = (
+        f"Save a file into {root} from base64 bytes, for the PDF tools to work on. Makes the folders "
+        "on the way, writes the file whole or not at all, and refuses a file already there unless "
+        "overwrite is true (which replaces it). Answers its path, size and SHA-256."
+    )
+
+    def get_file(file_path: FilePath) -> EmbeddedResource:
+        return answer(lambda: get_file_in(root, limit, file_path))
+
+    get_file.__doc__ = (
+        f"Get a file from {root} as an embedded resource (base64 blob, its media type read from its "
+        f"bytes), for example a PDF another tool wrote. At most {limit} bytes."
+    )
+
+    def list_files(
+        dir_path: Annotated[
+            str,
+            Field(
+                strict=True,
+                min_length=1,
+                description=f"The folder to list: {root} or a folder under it (absolute, or relative to it).",
+            ),
+        ] = str(root),
+    ) -> dict[str, Any]:
+        return answer(lambda: list_files_in(root, dir_path))
+
+    list_files.__doc__ = (
+        f"List files and folders in {root} or a folder under it: name, path, type (file or folder), "
+        f"size in bytes and when it was modified, folders first. At most {MAX_LIST_ENTRIES} entries."
+    )
+
+    def delete_file(file_path: FilePath) -> dict[str, Any]:
+        return answer(lambda: delete_file_in(root, file_path))
+
+    delete_file.__doc__ = (
+        f"Delete a file or an empty folder under {root}; a link is removed itself, not what it points "
+        f"to. Never {root} itself."
+    )
+
+    tools = (
+        (
+            put_file,
+            ToolAnnotations(
+                title="Save a file",
+                readOnlyHint=False,
+                destructiveHint=False,
+                idempotentHint=False,
+                openWorldHint=False,
+            ),
+        ),
+        (
+            get_file,
+            ToolAnnotations(
+                title="Get a file", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+            ),
+        ),
+        (
+            list_files,
+            ToolAnnotations(
+                title="List files", readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+            ),
+        ),
+        (
+            delete_file,
+            ToolAnnotations(
+                title="Delete a file",
+                readOnlyHint=False,
+                destructiveHint=True,
+                idempotentHint=True,
+                openWorldHint=False,
+            ),
+        ),
+    )
+    # This module's annotations are strings (PEP 563); these name local values.
+    scope = dict(locals())
+    for fn, hints in tools:
+        fn.__annotations__ = typing.get_type_hints(fn, localns=scope, include_extras=True)
+        server.tool(annotations=hints)(fn)
+        # Closed objects: an unknown argument is refused, not ignored.
+        tool = server._tool_manager.get_tool(fn.__name__)
+        base = tool.fn_metadata.arg_model
+        closed = type(
+            base.__name__, (base,), {"model_config": ConfigDict(extra="forbid", arbitrary_types_allowed=True)}
+        )
+        tool.fn_metadata.arg_model = closed
+        tool.parameters = closed.model_json_schema(by_alias=True)
+    return [fn.__name__ for fn, _ in tools]
+
+
 def build_server():
     from mcp.server.mcpserver import MCPServer
     from starlette.requests import Request
@@ -185,6 +579,7 @@ def build_server():
         wrapped.__doc__ = tool.description
         server.tool()(wrapped)
         names.append(tool.name)
+    names.extend(register_file_tools(server, root, max_file_bytes()))
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:

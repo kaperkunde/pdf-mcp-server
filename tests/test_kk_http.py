@@ -137,6 +137,19 @@ def test_every_exposed_path_argument_is_recognised() -> None:
             looks_like_path = any(part in name for part in ("path", "dir", "file", "pdf_list"))
             if looks_like_path and not kk_http.is_path_arg(name):
                 suspicious.append(f"{tool.name}.{name}")
+    # The file tools take the same argument names.
+    for name, params in (
+        ("put_file", inspect.signature(kk_http.put_file_in).parameters),
+        ("get_file", inspect.signature(kk_http.get_file_in).parameters),
+        ("list_files", inspect.signature(kk_http.list_files_in).parameters),
+        ("delete_file", inspect.signature(kk_http.delete_file_in).parameters),
+    ):
+        for arg in params:
+            if arg in ("root", "limit"):
+                continue
+            looks_like_path = any(part in arg for part in ("path", "dir", "file", "pdf_list"))
+            if looks_like_path and not kk_http.is_path_arg(arg):
+                suspicious.append(f"{name}.{arg}")
     assert suspicious == []
 
 
@@ -178,3 +191,236 @@ def test_allowed_hosts_add_to_loopback(monkeypatch) -> None:
     assert "127.0.0.1:*" in settings.allowed_hosts and "192.0.2.10:8000" in settings.allowed_hosts
     monkeypatch.setenv("MCP_ALLOWED_HOSTS", "*")
     assert not kk_http.transport_security().enable_dns_rebinding_protection
+
+
+# ---------------------------------------------------------------------------
+# put_file, get_file, list_files, delete_file
+# ---------------------------------------------------------------------------
+
+import base64  # noqa: E402
+import hashlib  # noqa: E402
+
+from pdf_mcp.kk_http import (  # noqa: E402
+    confine_entry,
+    delete_file_in,
+    get_file_in,
+    list_files_in,
+    put_file_in,
+    sniff_mime,
+)
+
+LIMIT = 1024
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def test_put_then_get_returns_the_same_bytes(root: Path) -> None:
+    data = bytes(range(256)) * 3
+    answer = put_file_in(root, LIMIT, "in/sub/x.bin", _b64(data))
+    assert answer == {
+        "path": str(root / "in" / "sub" / "x.bin"),
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "replaced": False,
+    }
+    resource = get_file_in(root, LIMIT, str(root / "in" / "sub" / "x.bin"))
+    assert resource.type == "resource"
+    assert base64.b64decode(resource.resource.blob) == data
+    assert resource.resource.mime_type == "application/octet-stream"
+    assert resource.resource.uri == (root / "in" / "sub" / "x.bin").as_uri()
+    assert resource.resource.uri.rsplit("/", 1)[-1] == "x.bin"
+    # No .part file is left behind.
+    assert sorted(p.name for p in (root / "in" / "sub").iterdir()) == ["x.bin"]
+
+
+def test_put_refuses_an_existing_file_unless_overwrite(root: Path) -> None:
+    put_file_in(root, LIMIT, "a.txt", _b64(b"one"))
+    with pytest.raises(Refused, match="overwrite"):
+        put_file_in(root, LIMIT, "a.txt", _b64(b"two"))
+    assert (root / "a.txt").read_bytes() == b"one"
+    answer = put_file_in(root, LIMIT, "a.txt", _b64(b"two"), overwrite=True)
+    assert answer["replaced"] is True
+    assert (root / "a.txt").read_bytes() == b"two"
+    (root / "folder").mkdir()
+    with pytest.raises(Refused, match="folder"):
+        put_file_in(root, LIMIT, "folder", _b64(b"x"), overwrite=True)
+
+
+def test_put_refuses_bad_base64(root: Path) -> None:
+    for bad in ("not base64!", "aGVsbG8", "aGVs\nbG8=", "aGVsbG8=é"):
+        with pytest.raises(Refused, match="base64"):
+            put_file_in(root, LIMIT, "a.txt", bad)
+    assert not (root / "a.txt").exists()
+
+
+def test_put_and_get_respect_the_size_cap(root: Path) -> None:
+    with pytest.raises(Refused, match="larger"):
+        put_file_in(root, LIMIT, "big.bin", _b64(b"x" * (LIMIT + 1)))
+    # Refused before decoding: an oversized string that is not even base64.
+    with pytest.raises(Refused, match="larger"):
+        put_file_in(root, LIMIT, "big.bin", "!" * (LIMIT * 2))
+    assert put_file_in(root, LIMIT, "edge.bin", _b64(b"x" * LIMIT))["bytes"] == LIMIT
+    (root / "big.bin").write_bytes(b"x" * (LIMIT + 1))
+    with pytest.raises(Refused, match="larger"):
+        get_file_in(root, LIMIT, "big.bin")
+
+
+def test_max_file_bytes_from_the_environment(monkeypatch) -> None:
+    monkeypatch.delenv("PDF_MCP_MAX_FILE_BYTES", raising=False)
+    assert kk_http.max_file_bytes() == 128 * 1024 * 1024
+    monkeypatch.setenv("PDF_MCP_MAX_FILE_BYTES", "2048")
+    assert kk_http.max_file_bytes() == 2048
+    for bad in ("0", "-1", "1e9", "lots"):
+        monkeypatch.setenv("PDF_MCP_MAX_FILE_BYTES", bad)
+        with pytest.raises(ValueError):
+            kk_http.max_file_bytes()
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["../x.pdf", "sub/../../x.pdf", "/data/../etc/passwd", "/etc/passwd", "~/x.pdf", "", "a\x00b"],
+)
+def test_file_tools_refuse_paths_outside_root(root: Path, value: str) -> None:
+    value = value.replace("/data", str(root))
+    (root / "sub").mkdir(exist_ok=True)
+    with pytest.raises(Refused):
+        put_file_in(root, LIMIT, value, _b64(b"x"))
+    with pytest.raises(Refused):
+        get_file_in(root, LIMIT, value)
+    with pytest.raises(Refused):
+        delete_file_in(root, value)
+    with pytest.raises(Refused):
+        list_files_in(root, value)
+
+
+def test_file_tools_refuse_a_link_out(root: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"secret")
+    (root / "out").symlink_to(outside)
+    (root / "file-out").symlink_to(outside / "secret.txt")
+    with pytest.raises(Refused):
+        put_file_in(root, LIMIT, "out/x.txt", _b64(b"x"))
+    with pytest.raises(Refused):
+        get_file_in(root, LIMIT, "out/secret.txt")
+    with pytest.raises(Refused):
+        get_file_in(root, LIMIT, "file-out")
+    with pytest.raises(Refused):
+        list_files_in(root, "out")
+    with pytest.raises(Refused):
+        delete_file_in(root, "out/secret.txt")
+    # Overwriting the link replaces the link, never the file it points to.
+    put_file_in(root, LIMIT, "file-out", _b64(b"mine"), overwrite=True)
+    assert (outside / "secret.txt").read_bytes() == b"secret"
+    assert not (root / "file-out").is_symlink()
+    # Deleting a link removes the link only.
+    (root / "file-out").unlink()
+    (root / "file-out").symlink_to(outside / "secret.txt")
+    assert delete_file_in(root, "file-out")["deleted"] == "link"
+    assert (outside / "secret.txt").exists()
+    assert list_files_in(root)["entries"] == []  # the link to a folder outside is not shown
+
+
+def test_delete_never_removes_root(root: Path) -> None:
+    for value in (str(root), str(root) + "/", "."):
+        with pytest.raises(Refused, match="data folder"):
+            delete_file_in(root, value)
+    assert root.is_dir()
+
+
+def test_delete_removes_files_and_empty_folders_only(root: Path) -> None:
+    put_file_in(root, LIMIT, "f/a.txt", _b64(b"a"))
+    with pytest.raises(Refused, match="not empty"):
+        delete_file_in(root, "f")
+    assert delete_file_in(root, "f/a.txt") == {"path": str(root / "f" / "a.txt"), "deleted": "file"}
+    assert delete_file_in(root, "f") == {"path": str(root / "f"), "deleted": "folder"}
+    with pytest.raises(Refused, match="no such"):
+        delete_file_in(root, "f")
+
+
+def test_list_puts_folders_first(root: Path) -> None:
+    put_file_in(root, LIMIT, "b.pdf", _b64(b"%PDF-1.7"))
+    put_file_in(root, LIMIT, "A.txt", _b64(b"hello"))
+    (root / "zeta").mkdir()
+    (root / "Alpha").mkdir()
+    (root / "inside").symlink_to(root / "b.pdf")
+    answer = list_files_in(root, str(root))
+    assert answer["path"] == str(root)
+    assert answer["truncated"] is False
+    assert [(e["name"], e["type"]) for e in answer["entries"]] == [
+        ("Alpha", "folder"),
+        ("zeta", "folder"),
+        ("A.txt", "file"),
+        ("b.pdf", "file"),
+        ("inside", "file"),
+    ]
+    a_txt = answer["entries"][2]
+    assert a_txt["bytes"] == 5 and a_txt["path"] == str(root / "A.txt")
+    assert a_txt["modified"].endswith("+00:00")
+    assert answer["entries"][0]["bytes"] is None
+    with pytest.raises(Refused, match="no such folder"):
+        list_files_in(root, "b.pdf")
+
+
+@pytest.mark.parametrize(
+    ("data", "mime"),
+    [
+        (b"%PDF-1.7\n...", "application/pdf"),
+        (b"\x89PNG\r\n\x1a\n....", "image/png"),
+        (b"\xff\xd8\xff\xe0....", "image/jpeg"),
+        (b"II*\x00....", "image/tiff"),
+        (b"MM\x00*....", "image/tiff"),
+        (b"GIF89a....", "image/gif"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+        ("Grüße\nline two\t.".encode(), "text/plain"),
+        (b"\x00\x01\x02binary", "application/octet-stream"),
+        (b"\xff\xfe\xfd", "application/octet-stream"),
+        (b"", "application/octet-stream"),
+    ],
+)
+def test_sniff_mime(data: bytes, mime: str) -> None:
+    assert sniff_mime(data) == mime
+
+
+def test_confine_entry_keeps_the_last_name(root: Path) -> None:
+    (root / "link").symlink_to(root / "target")
+    assert confine_entry("link", root, "file_path") == root / "link"
+    assert confine_entry(str(root), root, "file_path") == root
+    assert confine_entry("./", root, "file_path") == root
+
+
+def test_file_tools_through_the_server(root: Path, monkeypatch) -> None:
+    from mcp_types import EmbeddedResource
+
+    monkeypatch.setenv("PDF_MCP_DATA_DIR", str(root))
+    monkeypatch.setenv("PDF_MCP_MAX_FILE_BYTES", str(LIMIT))
+    server, names = kk_http.build_server()
+    assert set(kk_http.FILE_TOOL_NAMES) <= set(names)
+    listed = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    for name in kk_http.FILE_TOOL_NAMES:
+        schema = listed[name].input_schema
+        assert schema["additionalProperties"] is False
+        assert all(prop.get("description") for prop in schema["properties"].values())
+    assert listed["get_file"].annotations.read_only_hint is True
+    assert listed["list_files"].annotations.read_only_hint is True
+    assert listed["put_file"].annotations.read_only_hint is False
+    assert listed["put_file"].annotations.destructive_hint is False
+    assert listed["delete_file"].annotations.destructive_hint is True
+
+    data = b"%PDF-1.7 pretend"
+    put = asyncio.run(server.call_tool("put_file", {"file_path": "x.pdf", "content_base64": _b64(data)}))
+    assert put.structured_content["bytes"] == len(data)
+    got = asyncio.run(server.call_tool("get_file", {"file_path": str(root / "x.pdf")}))
+    (block,) = got.content
+    assert isinstance(block, EmbeddedResource)
+    assert block.resource.mime_type == "application/pdf"
+    assert base64.b64decode(block.resource.blob) == data
+    with pytest.raises(Exception, match="Extra inputs"):
+        asyncio.run(server.call_tool("get_file", {"file_path": "x.pdf", "mode": "raw"}))
+    with pytest.raises(Exception, match="overwrite"):
+        asyncio.run(server.call_tool("put_file", {"file_path": "x.pdf", "content_base64": _b64(data)}))
+    # Strict: no coercion of "yes" into true.
+    with pytest.raises(Exception, match="valid boolean"):
+        asyncio.run(server.call_tool("put_file", {"file_path": "x.pdf", "content_base64": "", "overwrite": "yes"}))

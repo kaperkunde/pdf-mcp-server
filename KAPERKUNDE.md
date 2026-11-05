@@ -51,7 +51,34 @@ an SBOM. Refer to the image by the digest that workflow prints.
    `ocr` extra, no dev tools); `poppler-utils`, `tesseract-ocr` with English
    and Dutch; runs as uid 10001, never root; `/data` is its volume and
    working directory. No `setup_environment.sh`, nothing piped into a shell.
-5. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
+5. **Files in and out over MCP** (`kk_http.py`, `register_file_tools`), so
+   an assistant can hand the tools a file and take the result back without
+   access to the volume:
+   - `put_file(file_path, content_base64, overwrite=false)` decodes strict
+     base64 (padded, no white space), makes the folders on the way, writes
+     `<name>.<random>.part` with an exclusive create and renames it into
+     place; a file already there is refused unless `overwrite` is true.
+     Answers `path`, `bytes`, `sha256` and `replaced`.
+   - `get_file(file_path)` answers the file as an MCP embedded resource: a
+     base64 `blob`, a `mimeType` read from its bytes (PDF, PNG, JPEG, TIFF,
+     GIF, WebP, UTF-8 text, else `application/octet-stream`) and a
+     `file:///data/<path>` URI whose last segment is the file's name.
+   - `list_files(dir_path="/data")`: name, path, type (`file` or `folder`),
+     bytes and modified time (UTC, ISO 8601), folders first, at most 5000.
+   - `delete_file(file_path)`: a file, a link (never what it points to) or
+     an empty folder; never `/data` itself.
+
+   All four refuse `..`, resolve the folder a name is in with `realpath` and
+   refuse it outside `/data` (a link is followed only to read or list
+   through, and only into `/data`), refuse unknown and mistyped arguments
+   (closed input schemas, no coercion), answer a refusal as a tool error
+   (`isError`), and stop at `PDF_MCP_MAX_FILE_BYTES` (default 128 MiB),
+   checked on the base64 length before decoding and again after. With
+   [PCP](https://pcp.gg): a kept file's handle (`{"$result": id}`) given as
+   `content_base64` arrives as base64, and `get_file`'s answer is kept as a
+   file and comes back as a handle, so the bytes never pass through the
+   assistant.
+6. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
    `bootstrap-labels.yml` (a weekly scheduled job) workflows are removed.
 
 ## Running it
@@ -64,7 +91,8 @@ docker run -d --name pdf-mcp \
   ghcr.io/kaperkunde/pdf-mcp-server@sha256:<digest>
 ```
 
-Put PDFs in the `pdf-mcp-data` volume; tools read and write there only.
+Put PDFs in the `pdf-mcp-data` volume, or send them with `put_file`; tools
+read and write there only, and `get_file` takes results out.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -75,8 +103,9 @@ Put PDFs in the `pdf-mcp-data` volume; tools read and write there only.
 | `PDF_MCP_DATA_DIR` | `/data` | The one directory tools may touch. |
 | `PDF_MCP_ENABLE_AI_TOOLS` | off | `1` registers the `ai` tools (they still find no LLM in this image). |
 | `PDF_MCP_ALLOW_SIGNING_NETWORK` | off | `1` lets signing reach a timestamp server and fetch revocation data. |
+| `PDF_MCP_MAX_FILE_BYTES` | `134217728` (128 MiB) | The largest file `put_file` takes and `get_file` answers. |
 
-## Tools exposed by default (53)
+## Tools exposed by default (57)
 
 | Verb | Tools |
 | --- | --- |
@@ -89,6 +118,7 @@ Put PDFs in the `pdf-mcp-data` volume; tools read and write there only.
 | `extract` | `get_pdf_text_blocks`, `extract_tables`, `extract_images`, `extract_links`, `detect_barcodes`, `extract_text`, `export_pdf` |
 | `ocr` | `get_ocr_languages`, `get_image_info` |
 | `batch` | `compare_pdfs`, `batch_process` |
+| files (this fork) | `put_file`, `get_file`, `list_files`, `delete_file` |
 
 Off unless `PDF_MCP_ENABLE_AI_TOOLS=1`: `get_llm_backend_info`,
 `auto_fill_pdf_form`, `extract_structured_data`, `analyze_pdf_content`.
