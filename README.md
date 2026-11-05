@@ -12,6 +12,17 @@ scanned / image-based documents, and fill any PDF form. Works equally
 well as a daily CLI for humans, as a CI / automation script, and as an
 MCP server inside Cursor or Claude Desktop.
 
+> **Kaperkunde fork.** This is Kaperkunde's reviewed copy of
+> [nfsarch33/pdf-mcp-server](https://github.com/nfsarch33/pdf-mcp-server),
+> pinned at upstream `v2.0.0` (commit `f5f3cee3b17f24ea8221058702c4163370ce2c90`).
+> It adds a container image, `ghcr.io/kaperkunde/pdf-mcp-server`, that serves
+> the tools over MCP Streamable HTTP at `/mcp` (`python -m pdf_mcp.kk_http`),
+> confines every path to `/data`, leaves signing's network fetches and the
+> LLM (`ai`) tools off, and runs as a non-root user. The image bundles
+> PyMuPDF, which is **AGPL-3.0**: see [NOTICE](NOTICE). What changed, what
+> the security review found, the settings and the tools exposed:
+> [KAPERKUNDE.md](KAPERKUNDE.md).
+
 ## Status
 [![Release](https://img.shields.io/github/v/release/nfsarch33/pdf-mcp-server?style=flat&label=release)](https://github.com/nfsarch33/pdf-mcp-server/releases/latest)
 [![CI](https://github.com/nfsarch33/pdf-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/nfsarch33/pdf-mcp-server/actions/workflows/ci.yml)

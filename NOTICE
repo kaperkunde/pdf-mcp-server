@@ -66,3 +66,33 @@ A future release may explore replacing pymupdf with pypdf + pdfminer.six +
 pdfplumber + tesseract direct integration to remove the AGPL dependency
 entirely. See https://github.com/nfsarch33/pdf-mcp-server/issues for the
 tracking issue.
+
+================================================================================
+KAPERKUNDE FORK AND CONTAINER IMAGE
+================================================================================
+
+This copy is Kaperkunde's fork (https://github.com/kaperkunde/pdf-mcp-server)
+of upstream v2.0.0 (commit f5f3cee3b17f24ea8221058702c4163370ce2c90), with
+the additions listed in KAPERKUNDE.md, also under Apache-2.0.
+
+The container image built from it (ghcr.io/kaperkunde/pdf-mcp-server)
+bundles pymupdf and MuPDF, licensed under AGPL-3.0, together with this
+project's Apache-2.0 code and the Debian packages of its base image
+(poppler-utils is GPL-2.0/GPL-3.0, tesseract-ocr Apache-2.0). Publishing
+the image is distributing a combined work that includes AGPL-3.0 software,
+so:
+
+  - Whoever distributes the image offers the complete corresponding source
+    of its AGPL-3.0 and GPL parts: this repository at the image's tag,
+    uv.lock (which names each Python package version and its PyPI hash),
+    and the upstream sources of pymupdf/MuPDF and the Debian packages.
+    This repository being public, with the tag the image was built from,
+    is how Kaperkunde meets that for its own code and pins.
+  - Anyone who modifies the image's AGPL-3.0 components and lets others
+    use it over a network must offer those users the modified source
+    (AGPL-3.0 section 13). Running the unmodified image for oneself,
+    as a PCP owner does, triggers no such duty.
+  - Using a commercial pymupdf licence from Artifex instead is the only way
+    to distribute the image under terms other than AGPL-3.0 for that part.
+
+This is a summary, not legal advice; the licences' own texts govern.
