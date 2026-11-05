@@ -1,0 +1,15 @@
+.git
+.github
+.sentrux
+.venv
+venv
+**/__pycache__
+*.pyc
+tests
+docs
+scripts
+coverage.xml
+.coverage*
+dist
+build
+*.egg-info
