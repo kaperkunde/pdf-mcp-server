@@ -481,3 +481,101 @@ def test_signing_is_open_world_only_with_signing_network(root: Path, monkeypatch
     assert listed["sign_pdf"].annotations.open_world_hint is True
     assert listed["sign_pdf_pem"].annotations.open_world_hint is True
     assert listed["verify_digital_signatures"].annotations.open_world_hint is False
+
+
+def _blank_pdf(path: Path) -> Path:
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page()
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _server_call(server, name: str, arguments: dict) -> dict:
+    return asyncio.run(server.call_tool(name, arguments)).structured_content["result"]
+
+
+def test_check_outputs_refuses_writing_over_files(root: Path) -> None:
+    src = _blank_pdf(root / "a.pdf")
+    (root / "full").mkdir()
+    (root / "full" / "x.png").write_bytes(b"x")
+    (root / "empty").mkdir()
+    with pytest.raises(Refused, match="is the input \\(input_path\\).*new name"):
+        kk_http.check_outputs({"input_path": str(src), "output_path": str(src)})
+    with pytest.raises(Refused, match="is the input \\(pdf_list\\)"):
+        kk_http.check_outputs({"pdf_list": [str(root / "b.pdf"), str(src)], "output_path": str(src)})
+    with pytest.raises(Refused, match="already exists.*delete_file"):
+        kk_http.check_outputs({"input_path": str(src), "output_path": str(root / "full" / "x.png")})
+    with pytest.raises(Refused, match="already exists"):
+        kk_http.check_outputs({"pdf_path": str(src), "output_path": str(root / "empty")})
+    with pytest.raises(Refused, match="not an empty folder"):
+        kk_http.check_outputs({"pdf_path": str(src), "output_dir": str(root / "full")})
+    with pytest.raises(Refused, match="is the input"):
+        kk_http.check_outputs({"pdf_path": str(src), "output_dir": str(src)})
+    with pytest.raises(Refused, match="not an empty folder"):
+        kk_http.check_outputs({"pdf_path": str(src), "output_dir": str(root / "full" / "x.png")})
+    # New names, a new folder and an empty one are fine.
+    kk_http.check_outputs({"input_path": str(src), "output_path": str(root / "new" / "b.pdf")})
+    kk_http.check_outputs({"pdf_path": str(src), "output_dir": str(root / "empty")})
+    kk_http.check_outputs({"pdf_path": str(src), "output_dir": str(root / "parts")})
+    kk_http.check_outputs({"pdf_paths": [str(src)], "output_dir": None})
+
+
+def test_writes_never_replace_a_file(root: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PDF_MCP_DATA_DIR", str(root))
+    src = _blank_pdf(root / "a.pdf")
+    before = src.read_bytes()
+    server, _ = kk_http.build_server()
+    rotate = {"input_path": "a.pdf", "pages": [1], "degrees": 90}
+
+    answer = _server_call(server, "rotate_pages", {**rotate, "output_path": "a.pdf"})
+    assert "the input stays as it is" in answer["error"]
+    # The same file by another spelling is still the input.
+    answer = _server_call(server, "rotate_pages", {**rotate, "output_path": str(root / "." / "a.pdf")})
+    assert "is the input" in answer["error"]
+    assert src.read_bytes() == before
+
+    answer = _server_call(server, "rotate_pages", {**rotate, "output_path": "out/b.pdf"})
+    assert "error" not in answer
+    assert (root / "out" / "b.pdf").is_file()
+    written = (root / "out" / "b.pdf").read_bytes()
+    answer = _server_call(server, "rotate_pages", {**rotate, "output_path": "out/b.pdf"})
+    assert "already exists" in answer["error"] and "delete_file" in answer["error"]
+    assert (root / "out" / "b.pdf").read_bytes() == written
+
+    answer = _server_call(server, "split_pdf", {"pdf_path": "a.pdf", "output_dir": "out"})
+    assert "not an empty folder" in answer["error"]
+    answer = _server_call(server, "split_pdf", {"pdf_path": "a.pdf", "output_dir": "parts"})
+    assert len(answer["files_created"]) == 1
+    answer = _server_call(
+        server, "batch_process", {"pdf_paths": ["a.pdf"], "operation": "optimize", "output_dir": ".", "kwargs": {}}
+    )
+    assert "not an empty folder" in answer["error"]
+    assert src.read_bytes() == before
+
+
+def test_sign_pdf_never_signs_over_its_input(root: Path, monkeypatch) -> None:
+    from pdf_mcp import pdf_tools
+
+    if not getattr(pdf_tools, "_HAS_PYHANKO", False):
+        pytest.skip("pyHanko not available")
+    from test_pdf_tools import _make_test_certificates
+
+    monkeypatch.setenv("PDF_MCP_DATA_DIR", str(root))
+    certs = _make_test_certificates(root)
+    src = _blank_pdf(root / "contract.pdf")
+    before = src.read_bytes()
+    server, _ = kk_http.build_server()
+    sign = {"input_path": "contract.pdf", "pfx_path": str(certs["pfx"]), "pfx_password": "test-pass"}
+
+    answer = _server_call(server, "sign_pdf", {**sign, "output_path": "contract.pdf"})
+    assert "the input stays as it is" in answer["error"]
+    answer = _server_call(server, "sign_pdf", {**sign, "output_path": str(certs["cert"])})
+    assert "already exists" in answer["error"]
+    assert src.read_bytes() == before
+
+    answer = _server_call(server, "sign_pdf", {**sign, "output_path": "signed.pdf"})
+    assert answer["output_path"] == str(root / "signed.pdf")
+    assert pdf_tools.verify_digital_signatures(str(root / "signed.pdf"))["verified"] == 1

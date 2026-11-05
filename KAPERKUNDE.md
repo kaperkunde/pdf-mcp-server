@@ -42,6 +42,10 @@ an SBOM. Refer to the image by the digest that workflow prints.
      `*_password_file` arguments (a file under `/data`) instead;
    - accepts only Tesseract language codes (`eng`, `eng+nld`) for `language`
      and `ocr_language`, never a path;
+   - refuses to write over a file (`check_outputs`): an `output_path` or
+     `output_dir` that is one of the call's inputs ("write to a new name; the
+     input stays as it is"), an `output_path` already there, or an
+     `output_dir` that is not new or empty (see [Tool tiers](#tool-tiers));
    - answers errors without Python tracebacks.
 3. **No LLM tools.** The four `ai` tools are not registered unless
    `PDF_MCP_ENABLE_AI_TOOLS=1`, and the image does not install `openai` (the
@@ -144,16 +148,33 @@ and the `ai` tools.
 
 Idempotent among the writes: `create_pdf_form`,
 `create_pdf_form_from_template`, `flatten_pdf`, `clear_pdf_form_fields`,
-`set_pdf_metadata`, `sanitize_pdf_metadata` (a repeat leaves the same file,
-even in place).
+`set_pdf_metadata`, `sanitize_pdf_metadata` (their result depends on the
+arguments alone; a repeat is refused anyway, since its output is there).
 
 No upstream tool works in place by default: each takes its `output_path` or
 `output_dir` as a required argument, and the removing ones (`remove_pages`,
 `remove_annotations`, `redact_text_regex`, `sanitize_pdf_metadata`, …) write
-the result there and leave the input as it was. They do write over a file
-already at that name, the input too when a caller names it as the output, as
-upstream always has. Of all the tools only `put_file` refuses a file already
-there (unless `overwrite`).
+the result there and leave the input as it was. Upstream would also write
+over whatever is at that name, the input included (`sign_pdf` with the input
+as its output truncates the file it is still reading). So that a write only
+adds a file, `guarded` refuses, before the tool runs and without changing its
+arguments:
+
+- an output (`output_path`, `output_dir`) that is, after `realpath`, one of
+  the call's inputs (`input_path`, `pdf_path`, `pdf_list`, `pfx_path`, …):
+  "write to a new name; the input stays as it is";
+- an `output_path` that already exists (a file, a folder or a link): pick a
+  new name, or delete it first with `delete_file` (Destructive);
+- an `output_dir` that exists and is not an empty folder. `extract_images`,
+  `split_pdf` and `batch_process` (`optimize`) name their files from what
+  they find in the PDF, so which names they would take is not known before
+  they run; a new or empty folder is the cheap rule that holds. It also
+  applies to `batch_process` operations that write nothing, when an
+  `output_dir` is given.
+
+The check is made before the tool runs: a file another call makes at the
+same name in between is not seen. `put_file` keeps its own rule (refused
+unless `overwrite`).
 
 ## What the review found at v2.0.0
 

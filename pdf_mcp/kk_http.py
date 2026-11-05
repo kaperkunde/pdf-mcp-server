@@ -28,6 +28,9 @@ runs:
 * **Host header check** (DNS rebinding): loopback, which is how a tunnel or
   ``-p 127.0.0.1:…`` reaches it, plus ``MCP_ALLOWED_HOSTS`` (comma
   separated, ``host:*`` for any port; ``*`` turns the check off).
+* **No write over a file**: an ``output_path`` or ``output_dir`` that is one
+  of the call's inputs, an ``output_path`` already there, or an
+  ``output_dir`` that is not new or empty is refused (:func:`check_outputs`).
 * Errors are answered without tracebacks.
 * **Annotations on every tool**: read-only, write or destructive, idempotent
   and open-world hints from :data:`TOOL_TIERS`, reviewed per tool, so a
@@ -146,6 +149,51 @@ def check_arguments(arguments: dict[str, Any], root: Path, allow_signing_network
     return checked
 
 
+def is_output_arg(name: str) -> bool:
+    """``output_path`` / ``output_dir``: what a tool writes, never what it reads."""
+    return is_path_arg(name) and name.startswith("output_")
+
+
+def check_outputs(arguments: dict[str, Any]) -> None:
+    """Refuse a write over a file already there; ``arguments`` are confined.
+
+    * An output that is one of the call's inputs is refused, always.
+    * An ``output_path`` that exists (a file, a folder, a link) is refused.
+    * An ``output_dir`` must be new or empty: the tools that take one
+      (``extract_images``, ``split_pdf``, ``batch_process``) name the files
+      they write from what they find in the PDF, so which names they would
+      take is not known before they run. An empty folder holds no input.
+
+    Checked before the tool runs; a file another call makes in between is
+    not seen.
+    """
+    inputs: dict[str, str] = {}
+    for name, value in arguments.items():
+        if value is None or not is_path_arg(name) or is_output_arg(name):
+            continue
+        for item in value if isinstance(value, list) else [value]:
+            inputs.setdefault(item, name)
+    for name, value in arguments.items():
+        if value is None or not is_output_arg(name):
+            continue
+        if value in inputs:
+            raise Refused(f"{name} is the input ({inputs[value]}): write to a new name; the input stays as it is")
+        if name.endswith("_dir"):
+            if os.path.isdir(value) and not os.path.islink(value):
+                with os.scandir(value) as entries:
+                    if next(entries, None) is None:
+                        continue
+            if os.path.lexists(value):
+                raise Refused(
+                    f"{name} {value} already exists and is not an empty folder: name a new folder, "
+                    "or empty it first with delete_file (Destructive)"
+                )
+        elif os.path.lexists(value):
+            raise Refused(
+                f"{name} {value} already exists: pick a new name, or delete it first with delete_file (Destructive)"
+            )
+
+
 def guarded(fn: Callable[..., Any], root: Path, allow_signing_network: bool) -> Callable[..., Any]:
     """Wrap a tool: check its arguments, run it, answer errors without tracebacks."""
     from .pdf_tools import PdfToolError
@@ -157,6 +205,7 @@ def guarded(fn: Callable[..., Any], root: Path, allow_signing_network: bool) -> 
         try:
             bound = signature.bind_partial(*args, **kwargs)
             plain = {}
+            passed_on: dict[str, Any] = {}
             for name, value in bound.arguments.items():
                 kind = signature.parameters[name].kind
                 if kind is inspect.Parameter.VAR_KEYWORD:
@@ -165,12 +214,16 @@ def guarded(fn: Callable[..., Any], root: Path, allow_signing_network: bool) -> 
                     if set(value) == {name} and isinstance(value[name], dict):
                         value = value[name]
                     # batch_process passes **kwargs on to another tool: same checks.
-                    bound.arguments[name] = check_arguments(value, root, allow_signing_network)
+                    passed_on = check_arguments(value, root, allow_signing_network)
+                    bound.arguments[name] = passed_on
                 elif kind is inspect.Parameter.VAR_POSITIONAL:
                     raise Refused("positional arguments are not accepted")
                 else:
                     plain[name] = value
-            bound.arguments.update(check_arguments(plain, root, allow_signing_network))
+            checked = check_arguments(plain, root, allow_signing_network)
+            # Nothing is written over: not an input, not a file already there.
+            check_outputs({**passed_on, **checked})
+            bound.arguments.update(checked)
             result = fn(*bound.args, **bound.kwargs)
         except Refused as exc:
             return {"error": str(exc)}
@@ -201,10 +254,11 @@ READ = "read"  # reads its inputs and answers; writes nothing
 WRITE = "write"  # writes the output_path / output_dir it is given; never removes a file
 
 # name -> (tier, idempotentHint). Every write tool takes its output_path (or
-# output_dir) as a required argument and none writes over its input by
-# default; each writes over a file already at that name, as upstream does.
-# Idempotent: a read, or a write whose repeat with the same arguments leaves
-# the same file even when output_path names the input.
+# output_dir) as a required argument, and check_outputs refuses one that is
+# an input or already there (an output_dir that is not empty), so a write
+# only adds a file: none is destructive. Idempotent: a read, or a write
+# whose result depends on its arguments alone (no time, no random id, no
+# second pass over its own output).
 TOOL_TIERS: dict[str, tuple[str, bool]] = {
     # form
     "get_pdf_form_fields": (READ, True),
