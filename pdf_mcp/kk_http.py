@@ -104,7 +104,9 @@ def check_arguments(arguments: dict[str, Any], root: Path, allow_signing_network
         if value is None:
             continue
         if is_path_arg(name):
-            if isinstance(value, (list, tuple)):
+            # A list arrives as a list, or, for an Iterable[str] parameter
+            # (merge_pdfs), as pydantic's one-shot iterator: read it once here.
+            if not isinstance(value, (str, bytes, dict)) and hasattr(value, "__iter__"):
                 checked[name] = [confine(item, root, name) for item in value]
             else:
                 checked[name] = confine(value, root, name)

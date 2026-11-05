@@ -56,6 +56,13 @@ def test_check_arguments_covers_every_path_shape(root: Path) -> None:
             check_arguments({name: value}, root, False)
     checked = check_arguments({"pdf_list": ["a.pdf", str(root / "b.pdf")]}, root, False)
     assert checked["pdf_list"] == [str(root / "a.pdf"), str(root / "b.pdf")]
+    # merge_pdfs takes Iterable[str]: pydantic hands over a one-shot iterator.
+    checked = check_arguments({"pdf_list": iter(["a.pdf"])}, root, False)
+    assert checked["pdf_list"] == [str(root / "a.pdf")]
+    with pytest.raises(Refused):
+        check_arguments({"pdf_list": iter(["a.pdf", "/etc/x"])}, root, False)
+    with pytest.raises(Refused):
+        check_arguments({"pdf_list": [b"/etc/x"]}, root, False)
 
 
 def test_check_arguments_refuses_env_passwords(root: Path) -> None:
