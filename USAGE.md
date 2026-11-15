@@ -26,7 +26,7 @@ Run `pdf-mcp --help` for the top-level surface and `pdf-mcp <verb> --help` for t
 | `text` | 13 | Text annotations, redaction, watermarks, comments, page numbers, Bates stamps. |
 | `metadata` | 4 | Metadata read/write/sanitisation and PDF type/feature detection. |
 | `sign` | 6 | Digital and visual signatures. |
-| `extract` | 7 | Read-only extraction: text blocks, tables, images, links, structured data. |
+| `extract` | 8 | Read-only extraction: text blocks, tables, images, links, structured data. |
 | `ocr` | 2 | OCR helpers and image inspection. |
 | `batch` | 2 | Multi-file processing and comparisons. |
 | `ai` | 4 | LLM-backed extraction, auto-fill, and analysis. |
@@ -128,6 +128,7 @@ Read-only extraction: text blocks, tables, images, links, structured data.
 | `detect-barcodes` | Detect and decode barcodes/QR codes in a PDF. |
 | `extract-text` | Unified text extraction with multiple engine options and optional confidence scores. |
 | `export-pdf` | Export PDF content to different formats. |
+| `render-page` | Render a PDF page to a PNG picture (page image) at a set dpi. |
 
 ## `pdf-mcp ocr`
 

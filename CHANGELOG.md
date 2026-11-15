@@ -6,6 +6,9 @@ This project follows Keep a Changelog and Semantic Versioning.
 
 ## Unreleased
 
+### Added
+- `render_page(pdf_path, output_path, page_number=1, dpi=150, max_size=None)` (verb `extract`): renders one page of a PDF to a PNG with PyMuPDF. `dpi` is 36 to 300; `max_size` is the longest side in pixels, 64 to 8192 (default 4096), and the page is rendered smaller than `dpi` asks for when it would be larger. `output_path` must end in `.png`. Registered last, so the order of the other 57 tools is unchanged. In Kaperkunde's image it is a Write tool: it adds one new file and never writes over one.
+
 ## 2.0.0 - 2026-11-01
 
 ### Breaking
