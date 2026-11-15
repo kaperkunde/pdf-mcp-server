@@ -65,7 +65,7 @@ def test_max_size_shrinks_the_picture_below_what_dpi_asks(tmp_path: Path) -> Non
     result = pdf_tools.render_page(str(src), str(tmp_path / "p.png"), dpi=300, max_size=300)
     assert max(result["width"], result["height"]) <= 300
     assert result["width"] == 300
-    assert result["dpi"] == pytest.approx(108.0, abs=0.1)
+    assert result["dpi"] == pytest.approx(108.0, abs=0.01)
 
 
 def test_a_huge_page_is_held_to_the_default_longest_side(tmp_path: Path) -> None:
@@ -159,3 +159,34 @@ def test_through_the_server_it_stays_in_data_and_never_writes_over(root: Path, m
     assert "already exists" in again["error"]
     assert "is the input" in render({"pdf_path": "a.pdf", "output_path": "a.pdf"})["error"]
     assert "error" in render({"pdf_path": "a.pdf", "output_path": "q.png", "dpi": 9999})
+
+
+def test_refuses_a_corrupt_file_a_renamed_png_and_an_encrypted_pdf(tmp_path: Path) -> None:
+    corrupt = tmp_path / "corrupt.pdf"
+    corrupt.write_bytes(b"%PDF-1.7\nthis is not a pdf at all")
+    with pytest.raises(PdfToolError, match="Not a readable PDF"):
+        pdf_tools.render_page(str(corrupt), str(tmp_path / "c.png"))
+
+    png = tmp_path / "pic.pdf"
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 8, 8), False)
+    pixmap.save(str(tmp_path / "pic.png"))
+    png.write_bytes((tmp_path / "pic.png").read_bytes())
+    with pytest.raises(PdfToolError, match="Not a readable PDF"):
+        pdf_tools.render_page(str(png), str(tmp_path / "d.png"))
+
+    plain = _pdf(tmp_path / "plain.pdf")
+    locked = tmp_path / "locked.pdf"
+    doc = pymupdf.open(str(plain))
+    doc.save(str(locked), encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u")
+    doc.close()
+    with pytest.raises(PdfToolError, match="password protected"):
+        pdf_tools.render_page(str(locked), str(tmp_path / "e.png"))
+    assert not (tmp_path / "c.png").exists()
+    assert not (tmp_path / "d.png").exists()
+    assert not (tmp_path / "e.png").exists()
+
+
+def test_a_huge_page_reports_a_dpi_that_is_not_zero(tmp_path: Path) -> None:
+    src = _pdf(tmp_path / "big.pdf", pages=1, size=(14400, 14400))
+    result = pdf_tools.render_page(str(src), str(tmp_path / "p.png"), max_size=64)
+    assert 0 < result["dpi"] < 1

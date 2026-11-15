@@ -4309,8 +4309,15 @@ def render_page(
     src = _ensure_file(pdf_path)
     dst = _prepare_output(output_path)
 
-    doc = pymupdf.open(str(src))
     try:
+        doc = pymupdf.open(str(src), filetype="pdf")
+    except (pymupdf.FileDataError, ValueError, RuntimeError) as exc:
+        raise PdfToolError(f"Not a readable PDF: {exc}") from exc
+    try:
+        if not doc.is_pdf:
+            raise PdfToolError("Not a readable PDF: the file is not a PDF document")
+        if doc.needs_pass or doc.is_encrypted:
+            raise PdfToolError("The PDF is password protected")
         total_pages = doc.page_count
         if page_number > total_pages:
             raise PdfToolError(f"page_number {page_number} is out of range (the PDF has {total_pages} pages)")
@@ -4336,7 +4343,7 @@ def render_page(
         "page_count": total_pages,
         "width": width,
         "height": height,
-        "dpi": round(used_dpi, 1),
+        "dpi": round(used_dpi, 3),
         "bytes": dst.stat().st_size,
     }
 

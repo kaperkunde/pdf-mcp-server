@@ -7,7 +7,7 @@
 ## Overview
 
 - Name: pdf-mcp-server
-- Purpose: 57-tool PDF processing suite exposed as both a verb-first CLI (`pdf-mcp`) and an MCP server for Cursor/Claude Desktop; covers forms, pages, text, extraction, metadata, signatures, OCR, AI/VLM analysis, batch ops, and security.
+- Purpose: 58-tool PDF processing suite exposed as both a verb-first CLI (`pdf-mcp`) and an MCP server for Cursor/Claude Desktop; covers forms, pages, text, extraction, metadata, signatures, OCR, AI/VLM analysis, batch ops, and security.
 - Language(s): Python
 - License: Apache-2.0 (pymupdf dependency is AGPL-3.0)
 - Authoritative README: <https://github.com/nfsarch33/pdf-mcp-server#readme>
