@@ -96,7 +96,7 @@ pdf-mcp extract extract-text --json '{
 
 ## CLI surface
 
-`pdf-mcp` ships **all 57 underlying tools** as CLI subcommands grouped
+`pdf-mcp` ships **all 58 underlying tools** as CLI subcommands grouped
 by verb. The taxonomy comes directly from `pdf_mcp.registry`, so the
 CLI and MCP surfaces never drift.
 
@@ -217,14 +217,14 @@ Edit `~/.cursor/mcp.json`:
 ```
 Restart Cursor after saving.
 
-## Features overview (57 tools across 10 verbs)
+## Features overview (58 tools across 10 verbs)
 
 | Verb group | Tools | What it does |
 |------------|-------|--------------|
 | `form` | 9 | Read, fill, clear, flatten, and create PDF forms (AcroForm + label-detection fallback). |
 | `pages` | 8 | Merge, split, extract, rotate, reorder, insert, remove, optimise. |
 | `text` | 13 | Annotations, redaction, watermarks, comments, page numbers, Bates stamps. |
-| `extract` | 7 | Text blocks, tables, images, links, structured data, barcodes/QR, format export. |
+| `extract` | 8 | Text blocks, tables, images, links, structured data, barcodes/QR, format export, page to PNG. |
 | `metadata` | 4 | Read, write, sanitise metadata + classify PDF type (searchable / image / hybrid). |
 | `sign` | 6 | PKCS#12 / PEM digital signatures + signature image stamps + verification. |
 | `ocr` | 2 | OCR language inventory + image inspection (Tesseract + optional packs). |
@@ -234,7 +234,7 @@ Restart Cursor after saving.
 
 **See [`USAGE.md`](USAGE.md) for the full per-tool command reference.**
 
-The same 57 tools are exposed as MCP tools with their original
+The same 58 tools are exposed as MCP tools with their original
 `snake_case` names (e.g. `fill_pdf_form`, `extract_text`,
 `detect_pii_patterns`).
 
@@ -294,6 +294,7 @@ Note: XFA/LiveCycle forms are not supported; convert to AcroForm or flatten firs
 
 ### Export
 - `export_pdf(pdf_path, output_path, format="markdown", ...)`: export text to Markdown or JSON. Formats: "markdown", "json".
+- `render_page(pdf_path, output_path, page_number=1, dpi=150, max_size=None)`: render one page to a PNG (fork addition; `dpi` 36 to 300, `max_size` the longest side in pixels, 64 to 8192, default 4096).
 
 ### OCR and Text Extraction
 - `detect_pdf_type(pdf_path)`: analyze PDF to classify as "searchable", "image_based", or "hybrid"; returns page-by-page metrics and OCR recommendation.

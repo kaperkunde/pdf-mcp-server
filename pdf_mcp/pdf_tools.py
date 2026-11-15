@@ -4265,6 +4265,89 @@ def split_pdf(
         return _split_pdf_by_pages_impl(pdf_path, output_dir, pages_per_split=pages_per_split)
 
 
+RENDER_DEFAULT_DPI = 150
+RENDER_MIN_DPI = 36
+RENDER_MAX_DPI = 300
+RENDER_DEFAULT_MAX_SIZE = 4096
+RENDER_MIN_MAX_SIZE = 64
+RENDER_MAX_MAX_SIZE = 8192
+
+
+def render_page(
+    pdf_path: str,
+    output_path: str,
+    page_number: int = 1,
+    dpi: int = RENDER_DEFAULT_DPI,
+    max_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Render one page of a PDF to a PNG picture.
+
+    Args:
+        pdf_path: Path to the PDF
+        output_path: Path for the PNG (must end in .png)
+        page_number: The page to render, from 1 (default: 1)
+        dpi: Resolution, 36 to 300 (default: 150)
+        max_size: Longest side of the picture in pixels, 64 to 8192
+            (default: 4096); the page is rendered smaller than dpi asks for
+            when it would be larger
+
+    Returns:
+        Dict with the output path, page, page count, width, height, dpi used
+        and size in bytes
+    """
+    if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+        raise PdfToolError("page_number must be a whole number from 1")
+    if isinstance(dpi, bool) or not isinstance(dpi, int) or not RENDER_MIN_DPI <= dpi <= RENDER_MAX_DPI:
+        raise PdfToolError(f"dpi must be a whole number from {RENDER_MIN_DPI} to {RENDER_MAX_DPI}")
+    limit = RENDER_DEFAULT_MAX_SIZE if max_size is None else max_size
+    if isinstance(limit, bool) or not isinstance(limit, int) or not RENDER_MIN_MAX_SIZE <= limit <= RENDER_MAX_MAX_SIZE:
+        raise PdfToolError(f"max_size must be a whole number from {RENDER_MIN_MAX_SIZE} to {RENDER_MAX_MAX_SIZE}")
+    if not str(output_path).lower().endswith(".png"):
+        raise PdfToolError("output_path must end in .png")
+
+    src = _ensure_file(pdf_path)
+    dst = _prepare_output(output_path)
+
+    try:
+        doc = pymupdf.open(str(src), filetype="pdf")
+    except (pymupdf.FileDataError, ValueError, RuntimeError) as exc:
+        raise PdfToolError(f"Not a readable PDF: {exc}") from exc
+    try:
+        if not doc.is_pdf:
+            raise PdfToolError("Not a readable PDF: the file is not a PDF document")
+        if doc.needs_pass or doc.is_encrypted:
+            raise PdfToolError("The PDF is password protected")
+        total_pages = doc.page_count
+        if page_number > total_pages:
+            raise PdfToolError(f"page_number {page_number} is out of range (the PDF has {total_pages} pages)")
+        page = doc.load_page(page_number - 1)
+        rect = page.rect
+        longest = max(rect.width, rect.height)
+        if longest <= 0:
+            raise PdfToolError(f"Page {page_number} has no size")
+        scale = dpi / 72.0
+        used_dpi = float(dpi)
+        if longest * scale > limit:
+            scale = limit / longest
+            used_dpi = scale * 72.0
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False)
+        pixmap.save(str(dst))
+        width, height = pixmap.width, pixmap.height
+    finally:
+        doc.close()
+
+    return {
+        "output_path": str(dst),
+        "page_number": page_number,
+        "page_count": total_pages,
+        "width": width,
+        "height": height,
+        "dpi": round(used_dpi, 3),
+        "bytes": dst.stat().st_size,
+    }
+
+
 def export_pdf(
     pdf_path: str,
     output_path: str,

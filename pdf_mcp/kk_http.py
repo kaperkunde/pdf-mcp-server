@@ -316,6 +316,7 @@ TOOL_TIERS: dict[str, tuple[str, bool]] = {
     "detect_barcodes": (READ, True),
     "extract_text": (READ, True),
     "export_pdf": (WRITE, False),  # writes Markdown or JSON to output_path
+    "render_page": (WRITE, False),  # fork addition: writes one new PNG to output_path
     # ocr
     "get_ocr_languages": (READ, True),
     "get_image_info": (READ, True),

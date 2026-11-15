@@ -84,7 +84,17 @@ an SBOM. Refer to the image by the digest that workflow prints.
    assistant.
 6. **Tool annotations.** Every exposed tool states whether it reads, writes
    or destroys, from a reviewed table (see [Tool tiers](#tool-tiers)).
-7. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
+7. **`render_page`** (`pdf_tools.py`, registered last): a PDF page to a PNG, so
+   an assistant can look at it. `render_page(pdf_path, output_path,
+   page_number=1, dpi=150, max_size=None)`: the page from 1, `dpi` 36 to 300,
+   `max_size` the longest side in pixels (64 to 8192, default 4096; the page
+   is rendered smaller than `dpi` asks for when it would be larger), and
+   `output_path` ending in `.png`. It takes and gives a file as the other
+   tools do, under `/data`: `put_file` the PDF, `render_page`, then
+   `get_file` the PNG (with [PCP](https://pcp.gg), `convert_document` with
+   `to: "png"` does the three steps). Answers `output_path`, `page_number`,
+   `page_count`, `width`, `height`, `dpi` (as used) and `bytes`.
+8. Upstream's `ai-review.yml` (sends pull request diffs to OpenAI) and
    `bootstrap-labels.yml` (a weekly scheduled job) workflows are removed.
 
 ## Running it
@@ -111,7 +121,7 @@ read and write there only, and `get_file` takes results out.
 | `PDF_MCP_ALLOW_SIGNING_NETWORK` | off | `1` lets signing reach a timestamp server and fetch revocation data. |
 | `PDF_MCP_MAX_FILE_BYTES` | `134217728` (128 MiB) | The largest file `put_file` takes and `get_file` answers. |
 
-## Tools exposed by default (57)
+## Tools exposed by default (58)
 
 | Verb | Tools |
 | --- | --- |
@@ -121,7 +131,7 @@ read and write there only, and `get_file` takes results out.
 | `text` | `add_text_annotation`, `update_text_annotation`, `remove_text_annotation`, `remove_annotations`, `redact_text_regex`, `add_page_numbers`, `add_bates_numbering`, `add_text_watermark`, `add_highlight`, `add_date_stamp`, `add_comment`, `update_comment`, `remove_comment` |
 | `metadata` | `get_pdf_metadata`, `set_pdf_metadata`, `sanitize_pdf_metadata`, `detect_pdf_type` |
 | `sign` | `verify_digital_signatures`, `sign_pdf`, `sign_pdf_pem`, `add_signature_image`, `update_signature_image`, `remove_signature_image` |
-| `extract` | `get_pdf_text_blocks`, `extract_tables`, `extract_images`, `extract_links`, `detect_barcodes`, `extract_text`, `export_pdf` |
+| `extract` | `get_pdf_text_blocks`, `extract_tables`, `extract_images`, `extract_links`, `detect_barcodes`, `extract_text`, `export_pdf`, `render_page` (this fork) |
 | `ocr` | `get_ocr_languages`, `get_image_info` |
 | `batch` | `compare_pdfs`, `batch_process` |
 | files (this fork) | `put_file`, `get_file`, `list_files`, `delete_file` |
@@ -143,7 +153,7 @@ and the `ai` tools.
 | Tier | Tools |
 | --- | --- |
 | Read (`readOnlyHint`, idempotent) | `get_pdf_form_fields`, `get_form_templates`, `detect_form_fields`, `detect_pii_patterns`, `get_pdf_metadata`, `detect_pdf_type`, `verify_digital_signatures`, `get_pdf_text_blocks`, `extract_tables`, `extract_links`, `detect_barcodes`, `extract_text`, `get_ocr_languages`, `get_image_info`, `compare_pdfs`, `get_file`, `list_files`; with the `ai` tools, `get_llm_backend_info`, `extract_structured_data`, `analyze_pdf_content` |
-| Write (not read-only, not destructive) | every other upstream tool, including `extract_images`, `split_pdf` (files into `output_dir`), `export_pdf` (Markdown or JSON to `output_path`) and `batch_process` (`optimize` writes into `output_dir`); `put_file`; with the `ai` tools, `auto_fill_pdf_form` |
+| Write (not read-only, not destructive) | every other upstream tool, including `extract_images`, `split_pdf` (files into `output_dir`), `export_pdf` (Markdown or JSON to `output_path`) and `batch_process` (`optimize` writes into `output_dir`); `render_page` (this fork, one new PNG at `output_path`); `put_file`; with the `ai` tools, `auto_fill_pdf_form` |
 | Destructive | `delete_file` |
 
 Idempotent among the writes: `create_pdf_form`,

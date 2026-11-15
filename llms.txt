@@ -7,7 +7,7 @@
 ## Overview
 
 - Name: pdf-mcp-server
-- Purpose: 57-tool PDF processing suite exposed as both a verb-first CLI (`pdf-mcp`) and an MCP server for Cursor/Claude Desktop; covers forms, pages, text, extraction, metadata, signatures, OCR, AI/VLM analysis, batch ops, and security.
+- Purpose: 58-tool PDF processing suite exposed as both a verb-first CLI (`pdf-mcp`) and an MCP server for Cursor/Claude Desktop; covers forms, pages, text, extraction, metadata, signatures, OCR, AI/VLM analysis, batch ops, and security.
 - Language(s): Python
 - License: Apache-2.0 (pymupdf dependency is AGPL-3.0)
 - Authoritative README: <https://github.com/nfsarch33/pdf-mcp-server#readme>
@@ -33,7 +33,7 @@
 
 ## Key Concepts
 
-- 57 tools across 10 verb groups: form (9), pages (8), text (13), extract (7), metadata (4), sign (6), ocr (2), ai (4), batch (2), security (2)
+- 58 tools across 10 verb groups: form (9), pages (8), text (13), extract (8), metadata (4), sign (6), ocr (2), ai (4), batch (2), security (2)
 - CLI and MCP share the same `pdf_mcp.registry` source of truth
 - LLM backend priority: local VLM (free) > Ollama (free) > OpenAI (paid)
 - Privacy-first: local processing by default; remote LLM requires explicit opt-in

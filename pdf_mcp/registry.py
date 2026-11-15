@@ -568,5 +568,13 @@ def _seed_default_registry() -> None:
         import_path=f"{pt}:analyze_pdf_content",
     )
 
+    # Added by the Kaperkunde fork; last, so the order of the others is as upstream's.
+    register_tool(
+        name="render_page",
+        verb="extract",
+        description="Render a PDF page to a PNG picture (page image) at a set dpi.",
+        import_path=f"{pt}:render_page",
+    )
+
 
 _seed_default_registry()
